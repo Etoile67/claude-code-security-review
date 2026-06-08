@@ -64,7 +64,6 @@ runs:
       shell: bash
       run: |
         echo "::group::Install gh CLI"
-        # Install GitHub CLI for PR operations
         sudo apt-get update && sudo apt-get install -y gh
         echo "::endgroup::"
     
@@ -90,17 +89,13 @@ runs:
         PR_NUMBER: ${{ github.event.pull_request.number }}
         RUN_EVERY_COMMIT: ${{ inputs.run-every-commit }}
       run: |
-        # Check if ClaudeCode should be enabled
         ENABLE_CLAUDECODE="true"
         SILENCE_CLAUDECODE_COMMENTS="false"
         
-        # For PRs, check sampling and cache
         if [ "${{ github.event_name }}" == "pull_request" ]; then
           PR_NUMBER="$PR_NUMBER"
           CACHE_HIT="${{ steps.claudecode-history.outputs.cache-hit }}"
 
-          # Now check cache - if ClaudeCode has already run, disable unless run-every-commit is true
-          # Check if marker file exists (cache may have been restored from a different SHA)
           if [ "$RUN_EVERY_COMMIT" != "true" ] && [ -f ".claudecode-marker/marker.json" ]; then
             echo "ClaudeCode has already run on PR #$PR_NUMBER (found marker file), forcing disable to avoid false positives"
             ENABLE_CLAUDECODE="false"
@@ -131,7 +126,6 @@ runs:
         RUN_ID: ${{ github.run_id }}
         RUN_NUMBER: ${{ github.run_number }}
       run: |
-        # Create a reservation marker immediately to prevent other concurrent runs
         mkdir -p .claudecode-marker
         cat > .claudecode-marker/marker.json << EOF
         {
@@ -182,7 +176,7 @@ runs:
         GITHUB_REPOSITORY: ${{ github.repository }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         ANTHROPIC_API_KEY: ${{ inputs.claude-api-key }}
-        ENABLE_CLAUDE_FILTERING: 'true' 
+        ENABLE_CLAUDE_FILTERING: 'true'
         EXCLUDE_DIRECTORIES: ${{ inputs.exclude-directories }}
         FALSE_POSITIVE_FILTERING_INSTRUCTIONS: ${{ inputs.false-positive-filtering-instructions }}
         CUSTOM_SECURITY_SCAN_INSTRUCTIONS: ${{ inputs.custom-security-scan-instructions }}
@@ -193,34 +187,18 @@ runs:
         echo "Running ClaudeCode AI security analysis..."
         echo "----------------------------------------"
         
-        # Initialize outputs
         echo "findings_count=0" >> $GITHUB_OUTPUT
         echo "results_file=claudecode/claudecode-results.json" >> $GITHUB_OUTPUT
         
-        # Skip ClaudeCode if not a PR
-        if [ "${{ github.event_name }}" != "pull_request" ]; then
-          echo "ClaudeCode only runs on pull requests, skipping"
-          exit 0
-        fi
-        
-        # Validate API key is provided
         if [ -z "$ANTHROPIC_API_KEY" ]; then
-          echo "::error::ANTHROPIC_API_KEY is not set. Please provide the claude-api-key input to the action."
-          echo "Example usage:"
-          echo "  - uses: anthropics/claude-code-security-reviewer@main"
-          echo "    with:"
-          echo "      claude-api-key: \$\{{ secrets.ANTHROPIC_API_KEY }}"
+          echo "::error::ANTHROPIC_API_KEY is not set."
           exit 1
         fi
                 
-        # Set timeout
         export CLAUDE_TIMEOUT="$CLAUDECODE_TIMEOUT"
-        
-        # Run ClaudeCode audit with verbose debugging
         export REPO_PATH=$(pwd)
         cd "$ACTION_PATH"
         
-        # Enable verbose debugging
         echo "::group::ClaudeCode Environment"
         echo "Current directory: $(pwd)"
         echo "Python version: $(python --version)"
@@ -228,17 +206,13 @@ runs:
         echo "ANTHROPIC_API_KEY set: $(if [ -n "$ANTHROPIC_API_KEY" ]; then echo 'Yes'; else echo 'No'; fi)"
         echo "GITHUB_REPOSITORY: $GITHUB_REPOSITORY"
         echo "PR_NUMBER: $PR_NUMBER"
-        echo "Python path: $PYTHONPATH"
         echo "Files in claudecode directory:"
         ls -la claudecode/
         echo "::endgroup::"
         
         echo "::group::ClaudeCode Execution"
-        # Add current directory to Python path so it can find the claudecode module
         export PYTHONPATH="${PYTHONPATH:+$PYTHONPATH:}$(pwd)"
-        echo "Updated PYTHONPATH: $PYTHONPATH"
         
-        # Run from the action root directory so Python can find the claudecode module
         python -u claudecode/github_action_audit.py > claudecode/claudecode-results.json 2>claudecode/claudecode-error.log || CLAUDECODE_EXIT_CODE=$?
         
         if [ -n "$CLAUDECODE_EXIT_CODE" ]; then
@@ -247,51 +221,38 @@ runs:
           echo "ClaudeCode scan completed successfully"
         fi
         
-        # Parse ClaudeCode results and count findings regardless of exit code
         if [ -f claudecode/claudecode-results.json ]; then
           FILE_SIZE=$(wc -c < claudecode/claudecode-results.json)
           echo "ClaudeCode results file size: $FILE_SIZE bytes"
           
-          # Check if file is empty or too small
           if [ "$FILE_SIZE" -lt 2 ]; then
-            echo "::warning::ClaudeCode results file is empty or invalid (size: $FILE_SIZE bytes)"
-            echo "::warning::ClaudeCode may have failed silently. Check claudecode-error.log"
+            echo "::warning::ClaudeCode results file is empty"
             if [ -f claudecode/claudecode-error.log ]; then
-              echo "Error log contents:"
               cat claudecode/claudecode-error.log
             fi
             echo "findings_count=0" >> $GITHUB_OUTPUT
           else
-            echo "ClaudeCode results preview:"
             head -n 300 claudecode/claudecode-results.json || echo "Unable to preview results"
-                        
-            # Check if the result is an error
+            
             if jq -e '.error' claudecode/claudecode-results.json > /dev/null 2>&1; then
               ERROR_MSG=$(jq -r '.error' claudecode/claudecode-results.json)
               echo "::warning::ClaudeCode error: $ERROR_MSG"
               echo "findings_count=0" >> $GITHUB_OUTPUT
             else
-              # Use -r to get raw output and handle potential null/missing findings array
               CLAUDECODE_FINDINGS_COUNT=$(jq -r '.findings | if . == null then 0 else length end' claudecode/claudecode-results.json 2>/dev/null || echo "0")
-              echo "::debug::Extracted ClaudeCode findings count: $CLAUDECODE_FINDINGS_COUNT"
               echo "findings_count=$CLAUDECODE_FINDINGS_COUNT" >> $GITHUB_OUTPUT
               echo "ClaudeCode found $CLAUDECODE_FINDINGS_COUNT security issues"
-              
-              # Also create findings.json for PR comment script
               jq '.findings // []' claudecode/claudecode-results.json > findings.json || echo '[]' > findings.json
             fi
           fi
         else
           echo "::warning::ClaudeCode results file not found"
           if [ -f claudecode/claudecode-error.log ]; then
-            echo "Error log contents:"
             cat claudecode/claudecode-error.log
           fi
           echo "findings_count=0" >> $GITHUB_OUTPUT
         fi
         
-        # Always copy files to workspace root regardless of the outcome
-        # This ensures artifact upload and PR commenting can find them
         if [ -f findings.json ]; then
           cp findings.json ${{ github.workspace }}/findings.json || true
         fi
@@ -303,7 +264,6 @@ runs:
         fi
         
         echo "::endgroup::"
-    
     
     - name: Upload scan results
       if: always() && inputs.upload-results == 'true'
